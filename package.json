@@ -1,0 +1,26 @@
+{
+  "name": "join_now",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node index.js",
+    "api": "node api-server.js",
+    "build": "npm --prefix frontend run build && node scripts/sync-frontend-build.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.90.0",
+    "axios": "^1.15.1",
+    "cheerio": "^1.2.0",
+    "dotenv": "^17.4.2",
+    "node-cron": "^4.2.1",
+    "nodemailer": "^8.0.5",
+    "pg": "^8.20.0"
+  }
+}
