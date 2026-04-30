@@ -12,6 +12,11 @@ function roleFocus(role) {
     return 'Full Stack';
 }
 
+function buildConfiguredEmailTemplate({ role, roleDescription }) {
+    const subject = `Application: ${role || 'Open Role'}`;
+    return { subject, body: String(roleDescription || '').trim() };
+}
+
 function buildMinimalEmailTemplate({ name, company, role, jobTitle, jobUrl }) {
     const focus = roleFocus(role);
     const greetingName = name ? name.split(' ')[0] : '';
@@ -46,7 +51,11 @@ function buildMinimalEmailTemplate({ name, company, role, jobTitle, jobUrl }) {
     return { subject, body: lines.join('\n') };
 }
 
-async function generateEmail({ name, company, role, jobTitle, jobUrl }) {
+async function generateEmail({ name, company, role, jobTitle, jobUrl, roleDescription }) {
+    if (String(roleDescription || '').trim()) {
+        return buildConfiguredEmailTemplate({ role, roleDescription });
+    }
+
     const useAi = String(process.env.USE_AI_EMAILS || '').toLowerCase() === 'true';
     if (!useAi || !process.env.ANTHROPIC_API_KEY) {
         return buildMinimalEmailTemplate({ name, company, role, jobTitle, jobUrl });

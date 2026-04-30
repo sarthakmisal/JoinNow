@@ -7,6 +7,7 @@ const {
     isAlreadySent,
     isCompanyRoleBlocked,
     markCompanyRoleSent,
+    hasContactForOpening,
     saveContact,
     markSent,
 } = require('./db');
@@ -18,6 +19,15 @@ function sleep(ms) {
 
 function emit(onEvent, event) {
     if (typeof onEvent === 'function') onEvent(event);
+}
+
+function parseCities(value) {
+    return Array.isArray(value)
+        ? value.map(c => String(c || '').trim()).filter(Boolean)
+        : String(value || '')
+            .split(',')
+            .map(s => s.trim())
+            .filter(Boolean);
 }
 
 /**
@@ -41,7 +51,13 @@ async function runOutreach(options, onEvent) {
     const roleDefs = Array.isArray(options?.roles) && options.roles.length
         ? options.roles.map(r => {
             if (typeof r === 'string') return { name: r, description: '' };
-            return { name: String(r?.name || '').trim(), description: String(r?.description || '').trim() };
+            return {
+                name: String(r?.name || '').trim(),
+                description: String(r?.description || '').trim(),
+                remote_only: r?.remote_only ?? r?.remoteOnly,
+                city: r?.city,
+                cities: r?.cities,
+            };
         }).filter(r => r.name)
         : defaultRoleDefs;
 
@@ -51,13 +67,7 @@ async function runOutreach(options, onEvent) {
     const useHunterFallback = options?.useHunterFallback === undefined ? true : Boolean(options.useHunterFallback);
     const remoteOnly = options?.remoteOnly === undefined ? true : Boolean(options.remoteOnly);
     const city = String(options?.city || '').trim();
-    const citiesRaw = options?.cities;
-    const cities = Array.isArray(citiesRaw)
-        ? citiesRaw.map(c => String(c || '').trim()).filter(Boolean)
-        : String(citiesRaw || '')
-            .split(',')
-            .map(s => s.trim())
-            .filter(Boolean);
+    const cities = parseCities(options?.cities);
     const companyRoleCooldownDays = Number.isFinite(Number(options?.companyRoleCooldownDays))
         ? Number(options.companyRoleCooldownDays)
         : 30;
@@ -96,14 +106,19 @@ async function runOutreach(options, onEvent) {
         if (sent >= dailyLimit) break;
 
         const roleName = roleDef.name;
-        const cityList = remoteOnly ? [''] : (cities.length ? cities : city ? [city] : ['']);
+        const roleRemoteOnly = roleDef.remote_only === undefined || roleDef.remote_only === null
+            ? remoteOnly
+            : Boolean(roleDef.remote_only);
+        const roleCity = String(roleDef.city || city || '').trim();
+        const roleCities = parseCities(roleDef.cities === undefined || roleDef.cities === null ? cities : roleDef.cities);
+        const cityList = roleRemoteOnly ? [''] : (roleCities.length ? roleCities : roleCity ? [roleCity] : ['']);
 
         /** @type {any[]} */
         let targets = [];
         for (const cityItem of cityList) {
             if (sent >= dailyLimit) break;
 
-            const search = `${roleDef.name} ${roleDef.description || ''} ${remoteOnly ? '' : cityItem}`
+            const search = `${roleDef.name} ${roleDef.description || ''} ${roleRemoteOnly ? '' : cityItem}`
                 .replace(/\s+/g, ' ')
                 .trim()
                 .slice(0, 120);
@@ -111,8 +126,8 @@ async function runOutreach(options, onEvent) {
             let chunk = [];
             try {
                 chunk = await getJobTargets(search, {
-                    remoteOnly,
-                    city: remoteOnly ? '' : cityItem,
+                    remoteOnly: roleRemoteOnly,
+                    city: roleRemoteOnly ? '' : cityItem,
                 });
             } catch (e) {
                 failed++;
@@ -140,6 +155,14 @@ async function runOutreach(options, onEvent) {
             if (!t.company) continue;
 
             const companyRoleKey = `${String(t.company).toLowerCase()}|${String(roleName).toLowerCase()}`;
+            if (await hasContactForOpening(t.company, roleName, t.jobTitle)) {
+                emit(onEvent, {
+                    type: 'log',
+                    message: `Skipping ${t.company} (${roleName}) - contact already exists for this opening`,
+                });
+                continue;
+            }
+
             if (!collectOnly) {
                 if (companyRoleSentThisRun.has(companyRoleKey)) continue;
                 let alreadySentForCompanyRole = companyRoleAlreadySentCache.get(companyRoleKey);
@@ -221,17 +244,19 @@ async function runOutreach(options, onEvent) {
                         jobTitle: t.jobTitle,
                         jobUrl: t.jobUrl,
                         jobLocation: t.jobLocation,
-                        city: remoteOnly ? null : (t.__city || city || null),
+                        city: roleRemoteOnly ? null : (t.__city || roleCity || null),
                     });
 
                     if (collectOnly) {
                         emit(onEvent, { type: 'log', message: `[COLLECT_ONLY] Saved ${contact.email} @ ${t.company} (${roleName})` });
                         planned.add(contact.email);
                         sent++;
+                        break;
                     } else {
                         const { subject, body } = await generateEmail({
                             ...contact,
                             role: roleName,
+                            roleDescription: roleDef.description,
                             jobTitle: t.jobTitle,
                             jobUrl: t.jobUrl,
                         });

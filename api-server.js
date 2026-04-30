@@ -4,7 +4,15 @@ const fs = require('fs');
 const path = require('path');
 const { runOutreach } = require('./outreach');
 const { runSend } = require('./sender');
-const { initDb, getRoleConfigs, setRoleConfigs, getSettings, setSettings, listLeads } = require('./db');
+const {
+    initDb,
+    getRoleConfigs,
+    setRoleConfigs,
+    getSettings,
+    setSettings,
+    listLeads,
+    getDailyProgress,
+} = require('./db');
 
 const PORT = Number(process.env.API_PORT || 3001);
 
@@ -60,6 +68,9 @@ function compactRoles(input) {
                 return {
                     name: String(r.name || '').trim(),
                     description: String(r.description || '').trim(),
+                    remote_only: r.remote_only ?? r.remoteOnly,
+                    city: r.city === undefined ? undefined : String(r.city || '').trim(),
+                    cities: r.cities === undefined ? undefined : String(r.cities || '').trim(),
                     active: r.active === undefined ? true : Boolean(r.active),
                 };
             }
@@ -175,6 +186,19 @@ function createServer() {
                 return json(res, 200, { ok: true, settings });
             }
 
+            if (req.method === 'GET' && url.pathname === '/api/automation/status') {
+                const settings = await getSettings();
+                const progress = await getDailyProgress({
+                    dailyLimit: Number(settings.daily_limit || 100),
+                });
+                return json(res, 200, {
+                    ok: true,
+                    automationEnabled: Boolean(settings.automation_enabled),
+                    schedule: ['08:00', '13:00', '23:00'],
+                    progress,
+                });
+            }
+
             if (req.method === 'PUT' && url.pathname === '/api/config/settings') {
                 const body = await readJson(req);
                 await setSettings(body || {});
@@ -205,7 +229,7 @@ function createServer() {
                 if (!roles) {
                     roles = await getRoleConfigs({ activeOnly: true });
                 }
-                const dailyLimit = Number(body.dailyLimit || settings.daily_limit || 50);
+                const dailyLimit = Number(body.dailyLimit || settings.daily_limit || 100);
                 const remoteOnly = body.remoteOnly === undefined ? Boolean(settings.remote_only) : Boolean(body.remoteOnly);
                 const city = body.city === undefined ? (settings.city || null) : String(body.city || '').trim() || null;
                 const cities =
@@ -295,7 +319,7 @@ function createServer() {
                     roles = await getRoleConfigs({ activeOnly: true });
                 }
 
-                const dailyLimit = Number(body.dailyLimit || settings.daily_limit || 50);
+                const dailyLimit = Number(body.dailyLimit || settings.daily_limit || 100);
                 const dryRun = Boolean(body.dryRun);
                 const companyRoleCooldownDays = Number(
                     body.companyRoleCooldownDays ?? settings.company_role_cooldown_days ?? 30

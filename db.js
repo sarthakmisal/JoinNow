@@ -30,10 +30,16 @@ async function initDb() {
         CREATE TABLE IF NOT EXISTS role_configs (
             name TEXT PRIMARY KEY,
             description TEXT NOT NULL DEFAULT '',
+            remote_only BOOLEAN,
+            city TEXT,
+            cities TEXT,
             active BOOLEAN NOT NULL DEFAULT TRUE,
             updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
     `);
+    await pool.query('ALTER TABLE role_configs ADD COLUMN IF NOT EXISTS remote_only BOOLEAN');
+    await pool.query('ALTER TABLE role_configs ADD COLUMN IF NOT EXISTS city TEXT');
+    await pool.query('ALTER TABLE role_configs ADD COLUMN IF NOT EXISTS cities TEXT');
 
     await pool.query(`
         CREATE TABLE IF NOT EXISTS company_role_outreach (
@@ -47,7 +53,7 @@ async function initDb() {
     await pool.query(`
         CREATE TABLE IF NOT EXISTS app_settings (
             id INTEGER PRIMARY KEY,
-            daily_limit INTEGER NOT NULL DEFAULT 50,
+            daily_limit INTEGER NOT NULL DEFAULT 100,
             remote_only BOOLEAN NOT NULL DEFAULT TRUE,
             use_hunter_fallback BOOLEAN NOT NULL DEFAULT TRUE,
             collect_only BOOLEAN NOT NULL DEFAULT TRUE,
@@ -64,6 +70,7 @@ async function initDb() {
     await pool.query('ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS cities TEXT');
     await pool.query('ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS company_role_cooldown_days INTEGER NOT NULL DEFAULT 30');
     await pool.query('ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS automation_enabled BOOLEAN NOT NULL DEFAULT FALSE');
+    await pool.query('ALTER TABLE app_settings ALTER COLUMN daily_limit SET DEFAULT 100');
 
     // Ensure singleton row exists.
     await pool.query(
@@ -71,12 +78,13 @@ async function initDb() {
          VALUES (1)
          ON CONFLICT (id) DO NOTHING`
     );
+    await pool.query('UPDATE app_settings SET daily_limit=100 WHERE id=1 AND daily_limit < 100');
 }
 
 async function getRoleConfigs({ activeOnly = true } = {}) {
     const sql = activeOnly
-        ? 'SELECT name, description, active FROM role_configs WHERE active=true ORDER BY updated_at DESC'
-        : 'SELECT name, description, active FROM role_configs ORDER BY updated_at DESC';
+        ? 'SELECT name, description, remote_only, city, cities, active FROM role_configs WHERE active=true ORDER BY updated_at DESC'
+        : 'SELECT name, description, remote_only, city, cities, active FROM role_configs ORDER BY updated_at DESC';
     const res = await pool.query(sql);
     return res.rows || [];
 }
@@ -90,15 +98,28 @@ async function setRoleConfigs(roleDefs) {
         const name = String(r?.name || '').trim();
         if (!name) continue;
         const description = String(r?.description || '').trim();
+        const remote_only = r?.remote_only ?? r?.remoteOnly;
+        const city = r?.city === undefined ? null : String(r.city || '').trim() || null;
+        const cities = r?.cities === undefined ? null : String(r.cities || '').trim() || null;
         const active = r?.active === undefined ? true : Boolean(r.active);
         await pool.query(
-            `INSERT INTO role_configs (name, description, active, updated_at)
-             VALUES ($1,$2,$3,NOW())
+            `INSERT INTO role_configs (name, description, remote_only, city, cities, active, updated_at)
+             VALUES ($1,$2,$3,$4,$5,$6,NOW())
              ON CONFLICT (name) DO UPDATE SET
                 description=EXCLUDED.description,
+                remote_only=EXCLUDED.remote_only,
+                city=EXCLUDED.city,
+                cities=EXCLUDED.cities,
                 active=EXCLUDED.active,
                 updated_at=NOW()`,
-            [name, description, active]
+            [
+                name,
+                description,
+                remote_only === undefined ? null : Boolean(remote_only),
+                city,
+                cities,
+                active,
+            ]
         );
     }
 }
@@ -109,7 +130,7 @@ async function getSettings() {
     );
     return (
         res.rows?.[0] || {
-            daily_limit: 50,
+            daily_limit: 100,
             remote_only: true,
             use_hunter_fallback: true,
             collect_only: true,
@@ -188,6 +209,40 @@ async function isAlreadySent(email) {
     return res.rowCount > 0;
 }
 
+function getLocalDayBounds(date = new Date()) {
+    const start = new Date(date);
+    start.setHours(0, 0, 0, 0);
+    const end = new Date(start);
+    end.setDate(end.getDate() + 1);
+    return { start, end };
+}
+
+async function countSentBetween(start, end) {
+    const res = await pool.query(
+        'SELECT COUNT(*)::int AS count FROM hr_contacts WHERE sent=true AND sent_at >= $1 AND sent_at < $2',
+        [start, end]
+    );
+    return Number(res.rows?.[0]?.count || 0);
+}
+
+async function getDailyProgress({ date = new Date(), dailyLimit } = {}) {
+    const settings = dailyLimit === undefined ? await getSettings() : null;
+    const limit = Number.isFinite(Number(dailyLimit))
+        ? Number(dailyLimit)
+        : Number(settings?.daily_limit || 100);
+    const { start, end } = getLocalDayBounds(date);
+    const sentToday = await countSentBetween(start, end);
+    return {
+        date: start.toISOString().slice(0, 10),
+        dayStart: start.toISOString(),
+        dayEnd: end.toISOString(),
+        dailyLimit: limit,
+        sentToday,
+        remainingToday: Math.max(0, limit - sentToday),
+        targetReached: sentToday >= limit,
+    };
+}
+
 async function isCompanyRoleBlocked(company, role, cooldownDays) {
     const c = String(company || '').trim();
     const r = String(role || '').trim();
@@ -232,6 +287,24 @@ async function markCompanyRoleSent(company, role) {
          ON CONFLICT (company, role) DO UPDATE SET sent_at=EXCLUDED.sent_at`,
         [c, r]
     );
+}
+
+async function hasContactForOpening(company, role, jobTitle) {
+    const c = String(company || '').trim();
+    const r = String(role || '').trim();
+    const j = String(jobTitle || '').trim();
+    if (!c || !r) return false;
+
+    const res = await pool.query(
+        `SELECT 1
+         FROM hr_contacts
+         WHERE lower(company)=lower($1)
+           AND lower(role)=lower($2)
+           AND lower(COALESCE(job_title, ''))=lower($3)
+         LIMIT 1`,
+        [c, r, j]
+    );
+    return res.rowCount > 0;
 }
 
 async function saveContact({ name, email, company, role, jobTitle, jobUrl, jobLocation, city }) {
@@ -316,8 +389,10 @@ module.exports = {
     getSettings,
     setSettings,
     isAlreadySent,
+    getDailyProgress,
     isCompanyRoleBlocked,
     markCompanyRoleSent,
+    hasContactForOpening,
     saveContact,
     listLeads,
     listUnsentLeadsForRoles,

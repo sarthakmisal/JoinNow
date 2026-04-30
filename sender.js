@@ -39,6 +39,12 @@ async function runSend(options, onEvent) {
         .filter(r => r && (r.active === undefined ? true : Boolean(r.active)))
         .map(r => String(r.name || '').trim())
         .filter(Boolean);
+    const roleDescriptionByName = new Map(
+        roleDefs
+            .filter(r => r && (r.active === undefined ? true : Boolean(r.active)))
+            .map(r => [String(r.name || '').trim().toLowerCase(), String(r.description || '').trim()])
+            .filter(([name]) => name)
+    );
 
     const dailyLimit = Number.isFinite(Number(options?.dailyLimit))
         ? Number(options.dailyLimit)
@@ -90,6 +96,7 @@ async function runSend(options, onEvent) {
                 email,
                 company,
                 role,
+                roleDescription: roleDescriptionByName.get(role.toLowerCase()) || '',
                 jobTitle: lead.job_title,
                 jobUrl: lead.job_url,
             });
